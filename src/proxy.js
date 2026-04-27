@@ -8,7 +8,9 @@ export const config = {
     "/api/settings/:path*",
     "/api/keys",
     "/api/keys/:path*",
-    "/api/providers/client",
-    "/api/provider-nodes/validate",
+    "/api/providers",
+    "/api/providers/:path*",
+    "/api/provider-nodes",
+    "/api/provider-nodes/:path*",
   ],
 };

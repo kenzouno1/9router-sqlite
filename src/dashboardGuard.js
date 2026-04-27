@@ -33,8 +33,8 @@ const ALWAYS_PROTECTED = [
 const PROTECTED_API_PATHS = [
   "/api/settings",
   "/api/keys",
-  "/api/providers/client",
-  "/api/provider-nodes/validate",
+  "/api/providers",
+  "/api/provider-nodes",
 ];
 
 async function hasValidToken(request) {
