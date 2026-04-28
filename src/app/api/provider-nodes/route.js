@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createProviderNode, getProviderNodes } from "@/models";
 import { OPENAI_COMPATIBLE_PREFIX, ANTHROPIC_COMPATIBLE_PREFIX, CUSTOM_EMBEDDING_PREFIX } from "@/shared/constants/providers";
 import { generateId } from "@/shared/utils";
+import { validateBaseUrl } from "@/lib/network/safe-base-url";
 
 export const dynamic = "force-dynamic";
 
@@ -50,12 +51,16 @@ export async function POST(request) {
         return NextResponse.json({ error: "Invalid OpenAI compatible API type" }, { status: 400 });
       }
 
+      const finalBase = (baseUrl || OPENAI_COMPATIBLE_DEFAULTS.baseUrl).trim();
+      const check = validateBaseUrl(finalBase);
+      if (!check.ok) return NextResponse.json({ error: check.error }, { status: 400 });
+
       const node = await createProviderNode({
         id: `${OPENAI_COMPATIBLE_PREFIX}${apiType}-${generateId()}`,
         type: "openai-compatible",
         prefix: prefix.trim(),
         apiType,
-        baseUrl: (baseUrl || OPENAI_COMPATIBLE_DEFAULTS.baseUrl).trim(),
+        baseUrl: finalBase,
         name: name.trim(),
       });
       return NextResponse.json({ node }, { status: 201 });
@@ -67,6 +72,8 @@ export async function POST(request) {
       if (sanitizedBaseUrl.endsWith("/embeddings")) {
         sanitizedBaseUrl = sanitizedBaseUrl.slice(0, -"/embeddings".length);
       }
+      const check = validateBaseUrl(sanitizedBaseUrl);
+      if (!check.ok) return NextResponse.json({ error: check.error }, { status: 400 });
 
       const node = await createProviderNode({
         id: `${CUSTOM_EMBEDDING_PREFIX}${generateId()}`,
@@ -85,6 +92,8 @@ export async function POST(request) {
       if (sanitizedBaseUrl.endsWith("/messages")) {
         sanitizedBaseUrl = sanitizedBaseUrl.slice(0, -9); // remove /messages
       }
+      const check = validateBaseUrl(sanitizedBaseUrl);
+      if (!check.ok) return NextResponse.json({ error: check.error }, { status: 400 });
 
       const node = await createProviderNode({
         id: `${ANTHROPIC_COMPATIBLE_PREFIX}${generateId()}`,

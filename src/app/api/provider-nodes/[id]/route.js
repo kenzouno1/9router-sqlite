@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { deleteProviderConnectionsByProvider, deleteProviderNode, getProviderConnections, getProviderNodeById, updateProviderConnection, updateProviderNode } from "@/models";
+import { validateBaseUrl } from "@/lib/network/safe-base-url";
 
 // PUT /api/provider-nodes/[id] - Update provider node
 export async function PUT(request, { params }) {
@@ -46,6 +47,11 @@ export async function PUT(request, { params }) {
       if (sanitizedBaseUrl.endsWith("/embeddings")) {
         sanitizedBaseUrl = sanitizedBaseUrl.slice(0, -"/embeddings".length);
       }
+    }
+
+    const baseCheck = validateBaseUrl(sanitizedBaseUrl);
+    if (!baseCheck.ok) {
+      return NextResponse.json({ error: baseCheck.error }, { status: 400 });
     }
 
     const updates = {

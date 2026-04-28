@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { validateBaseUrl } from "@/lib/network/safe-base-url";
 
 // Fetch with timeout wrapper
 const fetchWithTimeout = (url, options, timeout = 10000) => {
@@ -62,6 +63,12 @@ export async function POST(request) {
     // Validate URL format
     if (!isValidUrl(baseUrl)) {
       return NextResponse.json({ error: "Invalid URL format" }, { status: 400 });
+    }
+
+    // SSRF guard: reject non-http(s) schemes and known cloud metadata hosts
+    const safe = validateBaseUrl(baseUrl);
+    if (!safe.ok) {
+      return NextResponse.json({ error: safe.error }, { status: 400 });
     }
 
     // Custom Embedding Validation - test POST /embeddings directly
