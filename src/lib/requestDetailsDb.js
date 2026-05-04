@@ -12,6 +12,13 @@ const DEFAULT_BATCH_SIZE = 20;
 const DEFAULT_FLUSH_INTERVAL_MS = 5000;
 const DEFAULT_MAX_JSON_SIZE = 5 * 1024;
 const CONFIG_CACHE_TTL_MS = 5000;
+// Hard cap on in-memory write buffer. Under high-concurrency bursts (esp. when
+// upstream is rate-limited), the buffer can grow faster than SQLite can flush,
+// causing RAM bloat. Drop oldest entries beyond this cap — telemetry is
+// best-effort and never worth OOM'ing the server.
+const MAX_BUFFER_SIZE = 500;
+let droppedCount = 0;
+let lastDropWarnAt = 0;
 
 
 let cachedConfig = null;
@@ -160,6 +167,19 @@ export async function saveRequestDetail(detail) {
   if (!config.enabled) return;
 
   writeBuffer.push(detail);
+
+  // Backpressure: cap buffer to prevent unbounded growth when DB flush lags.
+  if (writeBuffer.length > MAX_BUFFER_SIZE) {
+    const overflow = writeBuffer.length - MAX_BUFFER_SIZE;
+    writeBuffer.splice(0, overflow);
+    droppedCount += overflow;
+    const now = Date.now();
+    if (now - lastDropWarnAt > 10000) {
+      console.warn(`[requestDetailsDb] Buffer overflow — dropped ${droppedCount} oldest record(s) since last warning`);
+      droppedCount = 0;
+      lastDropWarnAt = now;
+    }
+  }
 
   if (writeBuffer.length >= config.batchSize) {
     await flushToDatabase();

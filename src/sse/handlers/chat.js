@@ -13,6 +13,7 @@ import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
 import { handleComboChat } from "open-sse/services/combo.js";
+import { formatRetryAfter } from "open-sse/services/accountFallback.js";
 import { handleBypassRequest } from "open-sse/utils/bypassHandler.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import { detectFormatByEndpoint } from "open-sse/translator/formats.js";
@@ -20,12 +21,84 @@ import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 
+// Global concurrency limiter for /v1/chat/completions. Under heavy bursts
+// (especially when upstream is rate-limited), unbounded fan-in retains full
+// request bodies + closures per request and exhausts RAM. Limit to a safe
+// ceiling and shed load with 429 once exceeded. Set MAX_CONCURRENT_REQUESTS=0
+// to disable the limit.
+const MAX_CONCURRENT_REQUESTS = (() => {
+  const raw = parseInt(process.env.MAX_CONCURRENT_REQUESTS || "200", 10);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 200;
+})();
+if (!global._chatInflight) global._chatInflight = { count: 0 };
+const inflight = global._chatInflight;
+
+/**
+ * Fast-fail precheck for combo: if every model has all accounts locked, return
+ * 503 immediately without translating the body or hitting upstream. Cuts the
+ * RAM footprint of a request from "kept alive through 5 model attempts" down
+ * to a single short-lived response.
+ *
+ * @returns {Promise<{retryAfter:string, retryAfterHuman:string, lastError:string, lastStatus:number}|null>}
+ *   Returns null if at least one model has an available account.
+ */
+async function precheckComboAvailability(comboModels) {
+  let earliestRetryAfter = null;
+  let lastError = null;
+  let lastStatus = null;
+
+  for (const modelStr of comboModels) {
+    let info;
+    try {
+      info = await getModelInfo(modelStr);
+    } catch {
+      return null; // unknown model — let normal path handle it
+    }
+    if (!info?.provider) return null; // nested combo or alias edge case
+    const creds = await getProviderCredentials(info.provider, null, info.model);
+    // No credentials configured — let normal path produce 404
+    if (creds === null) return null;
+    // At least one available — let combo proceed
+    if (!creds.allRateLimited) return null;
+
+    if (creds.retryAfter && (!earliestRetryAfter || new Date(creds.retryAfter) < new Date(earliestRetryAfter))) {
+      earliestRetryAfter = creds.retryAfter;
+    }
+    if (!lastError && creds.lastError) lastError = creds.lastError;
+    if (!lastStatus && creds.lastErrorCode) lastStatus = Number(creds.lastErrorCode);
+  }
+
+  return {
+    retryAfter: earliestRetryAfter,
+    retryAfterHuman: earliestRetryAfter ? formatRetryAfter(earliestRetryAfter) : null,
+    lastError: lastError || "All combo models rate-limited",
+    lastStatus: lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE
+  };
+}
+
 /**
  * Handle chat completion request
  * Supports: OpenAI, Claude, Gemini, OpenAI Responses API formats
  * Format detection and translation handled by translator
  */
 export async function handleChat(request, clientRawRequest = null) {
+  // Concurrency gate — shed load fast under burst to protect RAM
+  if (MAX_CONCURRENT_REQUESTS > 0 && inflight.count >= MAX_CONCURRENT_REQUESTS) {
+    log.warn("CHAT", `Concurrency limit hit (${inflight.count}/${MAX_CONCURRENT_REQUESTS}) — shedding`);
+    return new Response(
+      JSON.stringify({ error: { message: "Server busy — too many concurrent requests" } }),
+      { status: 429, headers: { "Content-Type": "application/json", "Retry-After": "1" } }
+    );
+  }
+  inflight.count++;
+  try {
+    return await handleChatInner(request, clientRawRequest);
+  } finally {
+    inflight.count = Math.max(0, inflight.count - 1);
+  }
+}
+
+async function handleChatInner(request, clientRawRequest = null) {
   let body;
   try {
     body = await request.json();
@@ -98,6 +171,11 @@ export async function handleChat(request, clientRawRequest = null) {
     const comboStrategy = comboSpecificStrategy || settings.comboStrategy || "fallback";
     
     log.info("CHAT", `Combo "${modelStr}" with ${comboModels.length} models (strategy: ${comboStrategy})`);
+    const blocked = await precheckComboAvailability(comboModels);
+    if (blocked) {
+      log.warn("COMBO", `[${modelStr}] all models rate-limited (fast-fail) | ${blocked.retryAfterHuman || "no ETA"}`);
+      return unavailableResponse(blocked.lastStatus, `[combo:${modelStr}] ${blocked.lastError}`, blocked.retryAfter, blocked.retryAfterHuman);
+    }
     return handleComboChat({
       body,
       models: comboModels,
@@ -129,6 +207,11 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       const comboStrategy = comboSpecificStrategy || chatSettings.comboStrategy || "fallback";
       
       log.info("CHAT", `Combo "${modelStr}" with ${comboModels.length} models (strategy: ${comboStrategy})`);
+      const blocked = await precheckComboAvailability(comboModels);
+      if (blocked) {
+        log.warn("COMBO", `[${modelStr}] all models rate-limited (fast-fail) | ${blocked.retryAfterHuman || "no ETA"}`);
+        return unavailableResponse(blocked.lastStatus, `[combo:${modelStr}] ${blocked.lastError}`, blocked.retryAfter, blocked.retryAfterHuman);
+      }
       return handleComboChat({
         body,
         models: comboModels,

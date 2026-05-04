@@ -129,13 +129,16 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
         return result;
       }
 
-      // For transient errors (503/502/504), wait for cooldown before falling through
-      // so a briefly-overloaded provider gets a chance to recover rather than being
-      // skipped immediately (fixes: combo falls through on transient 503)
-      if (cooldownMs && cooldownMs > 0 && cooldownMs <= 5000 &&
+      // For transient errors (503/502/504), wait briefly before falling through
+      // so a momentarily-overloaded provider gets a chance to recover. Cap kept
+      // small (500ms) — under high concurrency, large sleeps multiply RAM since
+      // each waiting request retains body/headers/closures the whole time.
+      const TRANSIENT_SLEEP_CAP_MS = 500;
+      if (cooldownMs && cooldownMs > 0 &&
           (result.status === 503 || result.status === 502 || result.status === 504)) {
-        log.info("COMBO", `Model ${modelStr} transient ${result.status}, waiting ${cooldownMs}ms before next`);
-        await new Promise(r => setTimeout(r, cooldownMs));
+        const waitMs = Math.min(cooldownMs, TRANSIENT_SLEEP_CAP_MS);
+        log.info("COMBO", `Model ${modelStr} transient ${result.status}, waiting ${waitMs}ms before next`);
+        await new Promise(r => setTimeout(r, waitMs));
       }
 
       // Fallback to next model
